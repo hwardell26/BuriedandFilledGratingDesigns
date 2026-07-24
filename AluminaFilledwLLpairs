@@ -1,5 +1,3 @@
-
-
 import numpy as np
 import meent
 import matplotlib.pyplot as plt
@@ -30,7 +28,7 @@ TICK_FONT_SIZE = 15
 ANNOTATION_FONT_SIZE = 14
 
 # Increase to prioritize EFI mitigation, decrease to prioritize DE
-EFI_WEIGHT = 0.03
+EFI_WEIGHT = 0.05
 N_LAYERS = 6 #fill/grating/pairs
 
 
@@ -87,7 +85,7 @@ def compute_damage_factors(val, z_bounds, cutoff_field):
     hfo2_efi = max(region_max(val, z_bounds, 2), region_max(val, z_bounds, 4))
     stack_silica_efi = max(region_max(val, z_bounds, 3), region_max(val, z_bounds, 5))
     factors = {
-        "silica_pillar_fill": silica_efi * n_sio2 ** 3,
+        "silica_pillar": silica_efi * n_sio2 ** 3,
         "alumina_fill": alumina_efi * n_al2O3_1 ** 3,
         "hfo2_pairs": hfo2_efi * n_hfo2 ** 3,
         "silica_pairs": stack_silica_efi * n_sio2** 3,
@@ -113,6 +111,7 @@ def calculation_function(duty_cycle_siO2, height_siO2, al2O3_frac, pair1a, pair1
     AluminaMaxEFI = np.max(alumina_region) if alumina_region.size else 0.0   
     damage_factors = compute_damage_factors(val, z_bounds, cutoff_field)
     damage_factor = max(damage_factors.values())
+
 
     print("total DE of reflection", de_ri.sum())
     print("total DE of transmission", de_ti.sum())
@@ -144,16 +143,24 @@ def calculation_function(duty_cycle_siO2, height_siO2, al2O3_frac, pair1a, pair1
         rect = Rectangle((0, z0), val.shape[1], z1 - z0, edgecolor=color, facecolor="none", linewidth=1.5)
         ax.add_patch(rect)
     '''
-    ax.set_xlabel("X")
-    ax.set_ylabel("Z")
-    #ax.set_title("EFI (blue=grating, magenta=HfO2, cyan=SiO2 pair layer)")
+    total_thickness = sum(thickness)  # nm, actual stack height
+    extent = [0, period[0], total_thickness, 0]  # left, right, bottom, top (origin='upper')
+
+    fig, axes = plt.subplots(1, 2, figsize=(21, 7))
+    ax = axes[0]
+    im1 = ax.imshow(val, cmap="jet", aspect="auto", origin="upper", extent=extent)
+    ax.set_xlabel("X (nm)")
+    ax.set_ylabel("Z (nm)")
+    ax.set_title("EFI")
     plt.colorbar(im1, ax=ax)
+
     ax = axes[1]
-    im2 = ax.imshow(index_map, cmap="gray", aspect="auto", origin="upper")
-    ax.set_xlabel("X")
-    ax.set_ylabel("Z")
+    im2 = ax.imshow(index_map, cmap="gray", aspect="auto", origin="upper", extent=extent)
+    ax.set_xlabel("X (nm)")
+    ax.set_ylabel("Z (nm)")
     ax.set_title("Refractive Index Map")
     plt.colorbar(im2, ax=ax)
+
     plt.tight_layout()
     plt.show()
     return de_ri, de_ti, damage_factors
@@ -168,24 +175,46 @@ def minimization_function(x, EFI_WEIGHT):
     de_minus1 = de_ri[0, fto - 1]
     val = np.abs(field_cell[:, 0, :, 0]) ** 2
     res_z, res_x = val.shape
+    '''
     cutoff_field = int(round(res_x * duty_cycle_siO2))
     cutoff_field = np.clip(cutoff_field, 1, res_x - 1)
     damage_factors = compute_damage_factors(val, z_bounds, cutoff_field)
     damage_factor = max(damage_factors.values())
+    '''
+    cutoff_si_field = int(res_x * duty_cycle_siO2)
+    silica_efi_max = np.max(val[:, :cutoff_si_field])
+    alumina_efi_max = np.max(val[int(round(res_z/2)):, cutoff_si_field:])
+    silicaDamageFactor = silica_efi_max* n_sio2**3
+    #aluminaDamageFactor = alumina_efi_max* n_al2O3_1**3
+    aluminaDamageFactor = 0
+    if silicaDamageFactor>aluminaDamageFactor:
+        damage_factor = silicaDamageFactor
+    else:
+        damage_factor = aluminaDamageFactor
+    mechanicsFactor = thickness[0]/(duty_cycle_siO2*period[0])
+    objective = -de_minus1 + EFI_WEIGHT * damage_factor
+    #objective = -de_minus1/damage_factor
+    #objective = -de_minus1/damage_factor + EFI_WEIGHT*mechanicsFactor
+
     objective = -de_minus1 + EFI_WEIGHT * damage_factor
     print(f"duty_siO2={duty_cycle_siO2:.3f} h_siO2={height_siO2:.1f} al2O3_frac={al2O3_frac:.3f} "
           f"pair1=({pair1a:.1f},{pair1b:.1f}) pair2=({pair2a:.1f},{pair2b:.1f}) "
           f"DE-1={de_minus1:.4f} damage={damage_factor:.3f} obj={objective:.4f}")
     return objective
+    
 
 def main():
-    duty_cycle_siO2 = 0.30
-    height_siO2 = 300
-    al2O3_frac = 0.5
-    pair1a = 100
-    pair1b = 100
-    pair2a = 100
-    pair2b = 100
+    duty_cycle_siO2 = 0.3098650513210765
+    height_siO2 =1000.0
+    al2O3_frac = 0.6
+    pair1a = 109.29873886720141
+    pair1b = 206.7164399573354
+    pair2a = 190.6574196750673
+    pair2b = 153.76385275955462
+
+    #layers = [400,600,109.29873886720141,206.7164399573354,190.6574196750673,153.76385275955462]
+
+
     calculation_function(duty_cycle_siO2, height_siO2, al2O3_frac, pair1a, pair1b, pair2a, pair2b)
     x0 = [duty_cycle_siO2, height_siO2, al2O3_frac, pair1a, pair1b, pair2a, pair2b]
     bounds = [(0.2, 1.0), (100, 1000), (0.6, 0.95), (100, 300), (100, 300), (100, 300), (100, 300)]
