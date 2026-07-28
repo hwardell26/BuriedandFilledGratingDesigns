@@ -1,0 +1,198 @@
+#IMPORTS
+import numpy as np
+import meent
+import matplotlib.pyplot as plt
+import scipy
+from scipy.optimize import minimize
+from contextlib import contextmanager
+from scipy.optimize import differential_evolution
+
+#SET PARAMETERS
+n_top = 1.0
+n_bot = 1000
+#n_hfo2 = 1.8981
+n_al3O2 = 1.644
+n_sio2 = 1.45
+theta = 61 * np.pi / 180
+field_res_x = 100
+field_res_z = 100
+period = [574.7]
+wavelength = 1053
+pol = 0
+fto = 12
+type_complex = np.complex128
+rlist = ["total diffraction efficency of reflection:","total diffraction efficency of transmission:","Order 0 diffractive efficency:","Order -F1 diffraction efficency:",
+"Order 1 diffraction efficency:", "absorption:","EFI Max:","Max pillar EFI:","Max trench EFI:","minimization result","optimized DEs:", "Final optimized coating",
+"Duty cycle =", "Height =", "top Layer 1 =", "top Layer 2 =", "top Layer 3 =", "top Layer 4 =", "Optimization parameter result:", "LIDT Metric:"]
+names = ["top Layer 1","top Layer 2","top Layer 3","top Layer 4"]
+AL = ["Z-Axis", "X-Axis", "1D E-field Y", "Refractive Index Map (n)", "Damage Factor LIDT/EFI"]
+
+# (s,a,s,a) top films, (h) grating, (a,s,a,s) bottom layers
+material_list = ["sio2", "al2o3", "sio2", "al2o3", "grating", "al2o3", "sio2", "al2o3", "sio2"]
+EFI_WEIGHT = 0.10
+
+def _material_index(mat_name, duty_cycle, res_x):
+    if mat_name == "sio2":
+        return n_sio2
+    elif mat_name == "al2o3":
+        return n_al3O2
+    elif mat_name == "grating":
+        pillar_end = int(res_x * duty_cycle)
+        row = np.full(res_x, n_top)
+        row[:pillar_end] = n_sio2
+        return row
+    else:
+        raise ValueError(f"Unknown material tag: {mat_name}")
+
+
+def build_index_map(thickness, duty_cycle, res_z, res_x):
+    total_t = sum(thickness)
+    z_pixels = [max(1, round(res_z * t / total_t)) for t in thickness]
+    z_pixels[0] += res_z - sum(z_pixels)
+    n_map = np.zeros((res_z, res_x))
+    z0 = 0
+    for mat_name, n_z in zip(material_list, z_pixels):
+        z1 = z0 + n_z
+        val = _material_index(mat_name, duty_cycle, res_x)
+        n_map[z0:z1, :] = val
+        z0 = z1
+    return n_map
+
+#Calcuate and display DEs/absorption/EFIs
+def calculation_function(duty_cycle, height, layers=None):
+    if layers == None:
+        layers = [100,100,100,100,100,100,100,100,100]
+    #inialize base grating
+    ucell_1d_m = np.ones((9,1,500))
+    cutoff = int(ucell_1d_m.shape[2] * duty_cycle)
+    ucell_1d_m[8,0,:] = n_sio2 #THIN TOP FILMS
+    ucell_1d_m[7,0,:] = n_al3O2
+    ucell_1d_m[6,0,:] = n_sio2
+    ucell_1d_m[5,0,:] = n_al3O2
+    ucell_1d_m[4,0,:cutoff] = n_sio2 #pillar
+    ucell_1d_m[4,0, cutoff:] = n_al3O2 #fill
+    ucell_1d_m[3,0,:] = n_al3O2 #PAIR 1
+    ucell_1d_m[2,0,:] = n_sio2
+    ucell_1d_m[1,0,:] = n_al3O2 #PAIR 2
+    ucell_1d_m[0,0,:] = n_sio2
+    thickness = [layers [7], layers [6], layers [5], layers [4], height, layers [3], layers [2], layers [1], layers [0]]
+    #(s,a,s,a), (h), (a,s,a,s)
+    mee = meent.call_mee(backend=0,n_top=n_top,n_bot=n_bot,theta=theta,fto=fto,pol=pol,
+    wavelength=wavelength,period=period,ucell=ucell_1d_m,thickness=thickness,type_complex=type_complex)
+    #begin solving for DEs/absorption/EFIs
+    result1, field_cell = mee.conv_solve_field(res_z=field_res_z,res_y=1,res_x=field_res_x)
+    res = result1.res
+    de_ri = res.de_ri_s
+    de_ti = res.de_ti_s
+    print(field_cell.shape)
+    val = np.abs(field_cell[:,0,:,0])**2
+    print(val.shape)
+
+    pillar_end = int(val.shape[1] * duty_cycle)
+    pillar_region = val[:, :pillar_end]
+    trench_region = val[:, pillar_end:]
+    PillarMaxEFI = np.max(pillar_region)
+    print(pillar_end)
+    print(trench_region.shape)
+    TrenchMaxEFI = np.max(trench_region)
+    print(rlist[0], de_ri.sum())
+    print(rlist[1], de_ti.sum())
+    print(rlist[2], de_ri[0, fto])
+    print(rlist[3], de_ri[0, fto-1])
+    print(rlist[4], de_ri[0, fto+1])
+    print(rlist[5], (1-de_ti.sum())-de_ri.sum())
+    print(rlist[6], np.max(val))
+    print(rlist[7], PillarMaxEFI)
+    print(rlist[8], TrenchMaxEFI)
+    
+    #refractive index map
+    res_z, res_x = val.shape
+    n_map = build_index_map(thickness, duty_cycle, res_z, res_x)
+    de_minus1 = de_ri[0, fto-1]
+    damage_factor = 12/(val*n_map**3)
+    optimization_param = de_minus1/damage_factor
+    
+    print(rlist[17], np.min(damage_factor))
+    print(rlist[18], np.max(optimization_param))
+    print(rlist[19], np.unravel_index(np.argmax(optimization_param), optimization_param.shape)) #unravel convert array to coords 
+
+    total_thickness = sum(thickness)  # nm, actual stack height
+    extent = [0, period[0], total_thickness, 0]  # left, right, bottom, top (origin='upper')
+    fig, axes = plt.subplots(1, 2, figsize=(21, 7))
+    ax = axes[0]
+    im1 = ax.imshow(val, cmap="jet", aspect="auto", origin="upper", extent=extent)
+    ax.set_xlabel("X (nm)")
+    ax.set_ylabel("Z (nm)")
+    ax.set_title("EFI")
+    plt.colorbar(im1, ax=ax)
+    ax = axes[1]
+    im2 = ax.imshow(n_map, cmap="gray", aspect="auto", origin="upper", extent=extent)
+    ax.set_xlabel("X (nm)")
+    ax.set_ylabel("Z (nm)")
+    ax.set_title("Refractive Index Map")
+    plt.colorbar(im2, ax=ax)
+    plt.show()
+    return -np.max(optimization_param), de_ri, de_ti, PillarMaxEFI, TrenchMaxEFI  #return negative for minimization
+    
+#Jointly optimize grating/coating layers for duty cycle and height
+def minimization_function(x, efi_weight=EFI_WEIGHT):
+    #optimize base grating
+    duty_cycle, height, hfo2_1, sio2_1, hfo2_2, sio2_2, Al203LL1, Sio2LL1, Al203LL2, Sio2LL2 = x
+    ucell_1d_m = np.ones((9,1,500))*n_sio2
+    val = np.abs(a[:, 0, :, 0])**2
+    #cutoff = int(ucell_1d_m.shape[2] * duty_cycle)
+    field_res_z, field_res_x = val.shape
+    cutoff = int(round(field_res_x * duty_cycle))
+    ucell_1d_m[8,0,:] = np.ones(ucell_1d_m.shape[2])*n_sio2 #THIN TOP FILMS
+    ucell_1d_m[7,0,:] = np.ones(ucell_1d_m.shape[2])*n_al3O2
+    ucell_1d_m[6,0,:] = np.ones(ucell_1d_m.shape[2])*n_sio2
+    ucell_1d_m[5,0,:] = np.ones(ucell_1d_m.shape[2])*n_al3O2
+    ucell_1d_m[4,0,:cutoff] = n_sio2 #pillar
+    ucell_1d_m[4,0, cutoff] = n_al3O2 #fill
+    ucell_1d_m[3,0,:] = np.ones(ucell_1d_m.shape[2])*n_al3O2 #PAIR 1
+    ucell_1d_m[2,0,:] = np.ones(ucell_1d_m.shape[2])*n_sio2
+    ucell_1d_m[1,0,:] = np.ones(ucell_1d_m.shape[2])*n_al3O2 #PAIR 2
+    ucell_1d_m[0,0,:] = np.ones(ucell_1d_m.shape[2])*n_sio2
+    thickness = [sio2_1,hfo2_1, sio2_2, hfo2_2, height, Al203LL1, Sio2LL1, Al203LL2, Sio2LL2]
+    #call backend/calculate
+    mee = meent.call_mee(backend=0,n_top=n_top,n_bot=n_bot,theta=theta,fto=fto,pol=pol,wavelength=wavelength,
+    period=period,ucell=ucell_1d_m,thickness=thickness,type_complex=type_complex)
+    res,a = mee.conv_solve_field(res_z=field_res_z,res_y=1,res_x=field_res_x)
+    de_ri = res.res.de_ri_s
+    val = np.abs(a[:,0,:,0])**2
+    efi_max = np.max(val)
+
+    # Scalarized joint objective (minimize):
+    de_minus1 = de_ri[0, fto-1]
+    objective = -de_minus1 + efi_weight * efi_max
+
+    print(f"duty={duty_cycle:.3f} h={height:.1f}  DE-1={de_minus1:.4f}  EFI_max={efi_max:.3f}  obj={objective:.4f}")
+    return objective
+
+def main():
+    duty_cycle = .30  
+    height = 100
+    calculation_function(duty_cycle, height)
+    bounds = [(0.05,0.95),(100,500),(100,500),(100,500),(100,500),(100,1000),(100,500),(100,500),(100,500),(100,500)]
+    #result2 = differential_evolution(optimization_parameter_function,bounds=bounds,popsize=60,workers=-1,
+    result2 = differential_evolution(minimization_function,bounds=bounds,popsize=60,workers=-1,
+    maxiter=1000, polish=True,updating="deferred") #optimize optimization parameter
+    duty_cycle = result2.x[0]
+    height = result2.x[1]
+    layers = list(result2.x[2:])
+    print(result2)
+    print(rlist[10], result2)
+    print(rlist[12], duty_cycle)
+    print(rlist[17], layers[7])#height of top layers
+    print(rlist[16], layers[6])
+    print(rlist[15], layers[5])
+    print(rlist[14], layers[4])
+    print(rlist[13], height) #grating height
+    print("Al203LL1", layers[3])
+    print("Sio2LL1", layers[2])
+    print("Al203LL2", layers[1])
+    print("SiO2LL1", layers[0])
+    calculation_function(duty_cycle, height, layers)
+
+if __name__ == "__main__":
+    main()
