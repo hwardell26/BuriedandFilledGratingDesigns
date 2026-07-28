@@ -29,7 +29,7 @@ AL = ["Z-Axis", "X-Axis", "1D E-field Y", "Refractive Index Map (n)", "Damage Fa
 
 # (s,a,s,a) top films, (h) grating, (a,s,a,s) bottom layers
 material_list = ["sio2", "al2o3", "sio2", "al2o3", "grating", "al2o3", "sio2", "al2o3", "sio2"]
-EFI_WEIGHT = 0.10
+EFI_WEIGHT = 0.20
 
 def _material_index(mat_name, duty_cycle, res_x):
     if mat_name == "sio2":
@@ -38,8 +38,8 @@ def _material_index(mat_name, duty_cycle, res_x):
         return n_al3O2
     elif mat_name == "grating":
         pillar_end = int(res_x * duty_cycle)
-        row = np.full(res_x, n_top)
-        row[:pillar_end] = n_sio2
+        row = np.full(res_x, n_sio2)
+        row[:pillar_end] = n_al3O2
         return row
     else:
         raise ValueError(f"Unknown material tag: {mat_name}")
@@ -84,7 +84,6 @@ def calculation_function(duty_cycle, height, layers=None):
     res = result1.res
     de_ri = res.de_ri_s
     de_ti = res.de_ti_s
-    print(field_cell.shape)
     val = np.abs(field_cell[:,0,:,0])**2
     print(val.shape)
 
@@ -139,16 +138,15 @@ def minimization_function(x, efi_weight=EFI_WEIGHT):
     #optimize base grating
     duty_cycle, height, hfo2_1, sio2_1, hfo2_2, sio2_2, Al203LL1, Sio2LL1, Al203LL2, Sio2LL2 = x
     ucell_1d_m = np.ones((9,1,500))*n_sio2
-    val = np.abs(a[:, 0, :, 0])**2
-    #cutoff = int(ucell_1d_m.shape[2] * duty_cycle)
-    field_res_z, field_res_x = val.shape
-    cutoff = int(round(field_res_x * duty_cycle))
+  
+    cutoff = int(ucell_1d_m.shape[2] * duty_cycle)
+    #cutoff = int(round(field_res_x * duty_cycle))
     ucell_1d_m[8,0,:] = np.ones(ucell_1d_m.shape[2])*n_sio2 #THIN TOP FILMS
     ucell_1d_m[7,0,:] = np.ones(ucell_1d_m.shape[2])*n_al3O2
     ucell_1d_m[6,0,:] = np.ones(ucell_1d_m.shape[2])*n_sio2
     ucell_1d_m[5,0,:] = np.ones(ucell_1d_m.shape[2])*n_al3O2
     ucell_1d_m[4,0,:cutoff] = n_sio2 #pillar
-    ucell_1d_m[4,0, cutoff] = n_al3O2 #fill
+    ucell_1d_m[4,0, cutoff:] = n_al3O2 #fill
     ucell_1d_m[3,0,:] = np.ones(ucell_1d_m.shape[2])*n_al3O2 #PAIR 1
     ucell_1d_m[2,0,:] = np.ones(ucell_1d_m.shape[2])*n_sio2
     ucell_1d_m[1,0,:] = np.ones(ucell_1d_m.shape[2])*n_al3O2 #PAIR 2
@@ -157,21 +155,26 @@ def minimization_function(x, efi_weight=EFI_WEIGHT):
     #call backend/calculate
     mee = meent.call_mee(backend=0,n_top=n_top,n_bot=n_bot,theta=theta,fto=fto,pol=pol,wavelength=wavelength,
     period=period,ucell=ucell_1d_m,thickness=thickness,type_complex=type_complex)
-    res,a = mee.conv_solve_field(res_z=field_res_z,res_y=1,res_x=field_res_x)
-    de_ri = res.res.de_ri_s
-    val = np.abs(a[:,0,:,0])**2
+    result, field_cell = mee.conv_solve_field(res_z=field_res_z,res_y=1,res_x=field_res_x)
+    res = result.res
+    de_ri = res.de_ri_s
+    val = np.abs(field_cell[:,0,:,0])**2
     efi_max = np.max(val)
-
-    # Scalarized joint objective (minimize):
+    nz, nx = val.shape
     de_minus1 = de_ri[0, fto-1]
     objective = -de_minus1 + efi_weight * efi_max
-
-    print(f"duty={duty_cycle:.3f} h={height:.1f}  DE-1={de_minus1:.4f}  EFI_max={efi_max:.3f}  obj={objective:.4f}")
+    print(
+    f"duty={duty_cycle:.3f} "
+    f"h={height:.1f} "
+    f"DE-1={de_minus1:.4f} "
+    f"EFI_max={efi_max:.3f} "
+    f"obj={objective:.4f}"
+    )
     return objective
 
 def main():
     duty_cycle = .30  
-    height = 100
+    height = 1000
     calculation_function(duty_cycle, height)
     bounds = [(0.05,0.95),(100,500),(100,500),(100,500),(100,500),(100,1000),(100,500),(100,500),(100,500),(100,500)]
     #result2 = differential_evolution(optimization_parameter_function,bounds=bounds,popsize=60,workers=-1,
