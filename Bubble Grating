@@ -1,0 +1,151 @@
+import numpy as np
+import meent
+import matplotlib.pyplot as plt
+import scipy
+from scipy.optimize import minimize
+from contextlib import contextmanager
+from scipy.optimize import differential_evolution
+
+#SET PARAMETERS
+n_top = 1.0
+n_bot = 1000
+n_ceiling = 1.45 #silcia
+n_pillar = 1.45 #silica
+n_bubble = 1.0 #air
+theta = 61 * np.pi / 180
+field_res_x = 100
+field_res_z = 100
+field_res_y = 100
+period = [574.7]
+wavelength = 1053
+pol = 0
+fto = 12
+type_complex = np.complex128
+UCELL_RES = 1000
+
+
+# Increase to prioritize EFI mitigation (in silica), decrease to prioritize DE
+EFI_WEIGHT = 0.03
+
+
+def build_ucell(duty_cycle, pillar_height, ceiling_height, x_res=UCELL_RES): 
+    pillar_cutoff = int(round(x_res*duty_cycle))
+    pillar_cutoff = np.clip(pillar_cutoff, 1, x_res -1)
+#Two vetical layers
+#top layer: Sio2
+#bottom layer: half air and half Sio2
+#under: perfect reflector/n_bot
+    ucell_1d_m = np.ones((2,1,x_res))*n_ceiling
+    ucell_1d_m[1,0,:] = n_ceiling
+    ucell_1d_m[0,0,:pillar_cutoff] = n_pillar #two lateral regions in bottom layer
+    ucell_1d_m[0,0,pillar_cutoff:] = n_bubble
+    thickness = [ceiling_height, pillar_height]
+    index_map = np.ones((field_res_z * 2, field_res_x)) * n_ceiling
+    cutoff = int(round(field_res_x * duty_cycle))
+    index_map[field_res_z:, :cutoff] = n_pillar
+    index_map[field_res_z:, cutoff:] = n_bubble
+    return ucell_1d_m, thickness, pillar_cutoff, index_map
+
+def calculation_function(duty_cycle, pillar_height, ceiling_height):
+    ucell_1d_m, thickness, pillar_cutoff, index_map = build_ucell(duty_cycle, pillar_height,ceiling_height)
+    mee = meent.call_mee(backend=0, n_top=n_top, n_bot=n_bot, theta=theta, fto=fto, pol=pol, wavelength=wavelength, period=period, ucell=ucell_1d_m, thickness=thickness, type_complex=type_complex)
+    result1, field_cell = mee.conv_solve_field(res_z=field_res_z, res_y=1, res_x=field_res_x)
+    res = result1.res
+    de_ri = res.de_ri_s
+    de_ti = res.de_ti_s
+    print(field_cell.shape)
+    val = np.abs(field_cell[:, 0, :, 0])**2
+    print(val.shape)
+    res_z, res_x = val.shape
+    pillar_cutoff = int(round(res_x*duty_cycle))
+    #ucell_1d_m = np.ones((9,1,500))
+    cutoff = int(round(res_x * duty_cycle))
+    ceiling_region = val[:field_res_z, :]
+    pillar_region = val[field_res_z:, :cutoff] 
+    bubble_region = val[field_res_z:, cutoff:]
+    PillarMaxEFI =  np.max(pillar_region) #if pillar_region.size else 0.0
+    BubbleMaxEFI = np.max(bubble_region) #if bubble_region.size else 0.0
+    CeilingMaxEFI = np.max(ceiling_region) #if ceiling_region.size else 0.0
+    PillarDamageFactor = PillarMaxEFI*n_pillar**3
+    CeilingDamageFactor = CeilingMaxEFI*n_ceiling**3
+
+    print("total DE of reflection", de_ri.sum())
+    print("total DE of transmission", de_ti.sum())
+    print("Order 0 DE", de_ri[0, fto])
+    print("Order -1 DE", de_ri[0, fto-1])
+    print("Order 1 DE", de_ri[0, fto+1])
+    print("absorption", (1-de_ti.sum())-de_ri.sum())
+    print("EFI Max", np.max(val))
+    print("max pillar EFI", PillarMaxEFI)
+    print("max trench EFI", BubbleMaxEFI)
+    print("max top layer EFI", BubbleMaxEFI)
+    print("top layer height", ceiling_height)
+    print("pillar height", pillar_height)
+    print("LIDT metric", PillarDamageFactor)
+
+    total_thickness = sum(thickness) #combined pillar/ceiling height
+    extent = [0, period[0], total_thickness, 0]  # left, right, bottom, top (origin='upper')
+
+    fig, axes = plt.subplots(1, 2, figsize=(21, 7))
+    ax = axes[0]
+    im1 = ax.imshow(val, cmap="jet", aspect="auto", origin="upper", extent=extent)
+    ax.set_xlabel("X (nm)")
+    ax.set_ylabel("Z (nm)")
+    ax.set_title("EFI")
+    plt.colorbar(im1, ax=ax)
+    ax = axes[1]
+    im2 = ax.imshow(index_map, cmap="gray", aspect="auto", origin="upper", extent=extent)
+    ax.set_xlabel("X (nm)")
+    ax.set_ylabel("Z (nm)")
+    ax.set_title("Refractive Index Map")
+    plt.colorbar(im2, ax=ax)
+    plt.show()
+    return de_ri, de_ti, PillarMaxEFI, CeilingMaxEFI, PillarDamageFactor, CeilingDamageFactor
+
+def minimization_function(x, EFI_WEIGHT):
+    duty_cycle, pillar_height, ceiling_height = x
+    ucell_1d_m, thickness, pillar_cutoff, index_map = build_ucell(duty_cycle,pillar_height,ceiling_height)
+    mee = meent.call_mee(backend=0, n_top=n_top, n_bot=n_bot, theta=theta, fto=fto, pol=pol, wavelength=wavelength, period=period, ucell=ucell_1d_m, thickness=thickness, type_complex=type_complex)
+    result1, field_cell = mee.conv_solve_field(res_z=field_res_z, res_y=1, res_x=field_res_x)
+    result1, field_cell = mee.conv_solve_field(res_z=field_res_z, res_y=1, res_x=field_res_x)
+    de_ri = result1.res.de_ri_s
+    de_minus1 = de_ri[0, fto-1]
+    val = np.abs(field_cell[:, 0, :, 0])**2
+    res_z, res_x = val.shape
+    pillar_cutoff_field = int(res_x * duty_cycle)
+    ceiling_max_efi = np.max(val[:field_res_z, :])
+    pillar_max_efi =  np.max(val[field_res_z:, :pillar_cutoff_field])
+    bubble_max_efi = np.max(val[field_res_z:, pillar_cutoff_field:])
+    PillarDamageFactor = pillar_max_efi*n_pillar**3
+    CeilingDamageFactor = ceiling_max_efi**3
+    PillarDamageFactor = 0
+    if PillarDamageFactor>CeilingDamageFactor:
+        damage_factor = PillarDamageFactor
+    else:
+        damage_factor = CeilingDamageFactor
+    objective = -de_minus1 + EFI_WEIGHT * damage_factor
+    print(f"duty_cycle={duty_cycle:.3f} pillar height={pillar_height:.1f} "
+        f"top height={ceiling_height:.3f} DE-1={de_minus1:.1f}")
+    return objective
+
+def main():
+    duty_cycle = 0.3
+    pillar_height = 400
+    ceiling_height = 200
+    calculation_function(duty_cycle, pillar_height, ceiling_height)
+    bounds = [(0.2, 1.0), (100, 1000), (100, 1000)]
+    result1 = differential_evolution(minimization_function, bounds=bounds, args=(EFI_WEIGHT,),popsize=60, workers=-1, maxiter=1000, polish=True, updating="deferred")
+    print(result1)
+    duty_cycle = result1.x[0]
+    pillar_height = result1.x[1]
+    ceiling_height = result1.x[2]
+    print("Final structure")
+    print("pillar duty cycle", duty_cycle)
+    print("pillar height", pillar_height)
+    print("ceiling height", ceiling_height)
+    calculation_function(duty_cycle, pillar_height, ceiling_height)
+
+if __name__ == "__main__":
+    main()
+
+
