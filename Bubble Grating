@@ -22,7 +22,7 @@ pol = 0
 fto = 12
 type_complex = np.complex128
 UCELL_RES = 1000
-EFI_WEIGHT = 0.01 # Increase to prioritize EFI mitigation (in silica), decrease to prioritize DE
+EFI_WEIGHT = 0.03 # Increase to prioritize EFI mitigation (in silica), decrease to prioritize DE
 
 
 def build_ucell(duty_cycle, pillar_height, ceiling_height, x_res=UCELL_RES): 
@@ -33,10 +33,10 @@ def build_ucell(duty_cycle, pillar_height, ceiling_height, x_res=UCELL_RES):
 #bottom layer: half air and half Sio2
 #under: perfect reflector/n_bot
     ucell_1d_m = np.ones((2,1,x_res))*n_ceiling
-    ucell_1d_m[1,0,:] = n_ceiling
-    ucell_1d_m[0,0,:pillar_cutoff] = n_pillar #two lateral regions in bottom layer
-    ucell_1d_m[0,0,pillar_cutoff:] = n_bubble
-    thickness = [pillar_height, ceiling_height]
+    ucell_1d_m[0,0,:] = n_ceiling
+    ucell_1d_m[1,0,:pillar_cutoff] = n_pillar #two lateral regions in bottom layer
+    ucell_1d_m[1,0,pillar_cutoff:] = n_bubble
+    thickness = [ceiling_height,pillar_height]
     index_map = np.ones((field_res_z * 2, field_res_x)) * n_ceiling
     cutoff = int(round(field_res_x * duty_cycle))
     index_map[field_res_z:, :cutoff] = n_pillar
@@ -84,31 +84,22 @@ def calculation_function(duty_cycle, pillar_height, ceiling_height):
     extent = [0, period[0], total_thickness, 0]  
     fig, axes = plt.subplots(1, 2, figsize=(21, 7))
     ax = axes[0]
-    im1a = ax.imshow(ceiling_region, cmap="jet", aspect="auto", origin="upper",
-                      extent=[0, period[0], ceiling_height, 0],
-                      vmin=val.min(), vmax=val.max())
-    im1b = ax.imshow(val[field_res_z:, :], cmap="jet", aspect="auto", origin="upper",
-                      extent=[0, period[0], ceiling_height + pillar_height, ceiling_height],
-                      vmin=val.min(), vmax=val.max())
+    im1a = ax.imshow(ceiling_region, cmap="jet", aspect="auto", origin="upper",extent=[0, period[0], ceiling_height, 0],vmin=val.min(), vmax=val.max())
+    im1b = ax.imshow(val[field_res_z:, :], cmap="jet", aspect="auto", origin="upper",extent=[0, period[0], ceiling_height + pillar_height, ceiling_height],vmin=val.min(), vmax=val.max())
     ax.set_ylim(ceiling_height + pillar_height, 0)
     ax.set_xlabel("X (nm)")
     ax.set_ylabel("Z (nm)")
     ax.set_title("EFI")
     plt.colorbar(im1b, ax=ax)
     ax = axes[1]
-    im2a = ax.imshow(index_map[:field_res_z, :], cmap="gray", aspect="auto", origin="upper",
-                      extent=[0, period[0], ceiling_height, 0], vmin=n_bubble, vmax=n_ceiling)
-    im2b = ax.imshow(index_map[field_res_z:, :], cmap="gray", aspect="auto", origin="upper",
-                      extent=[0, period[0], ceiling_height + pillar_height, ceiling_height],
-                      vmin=n_bubble, vmax=n_ceiling)
+    im2a = ax.imshow(index_map[:field_res_z, :], cmap="gray", aspect="auto", origin="upper",extent=[0, period[0], ceiling_height, 0], vmin=n_bubble, vmax=n_ceiling)
+    im2b = ax.imshow(index_map[field_res_z:, :], cmap="gray", aspect="auto", origin="upper",extent=[0, period[0], ceiling_height + pillar_height, ceiling_height],vmin=n_bubble, vmax=n_ceiling)
     ax.set_ylim(ceiling_height + pillar_height, 0)
     ax.set_xlabel("X (nm)")
     ax.set_ylabel("Z (nm)")
     ax.set_title("Refractive Index Map")
     plt.colorbar(im2b, ax=ax)
-
     plt.show()
-    
     return de_ri, de_ti, PillarMaxEFI, CeilingMaxEFI, PillarDamageFactor, CeilingDamageFactor
 
 def minimization_function(x, EFI_WEIGHT):
@@ -124,13 +115,25 @@ def minimization_function(x, EFI_WEIGHT):
     ceiling_max_efi = np.max(val[:field_res_z, :])
     pillar_max_efi =  np.max(val[field_res_z:, :pillar_cutoff_field])
     bubble_max_efi = np.max(val[field_res_z:, pillar_cutoff_field:])
+
     PillarDamageFactor = pillar_max_efi*n_pillar**3
+    
     CeilingDamageFactor = ceiling_max_efi*n_ceiling**3
+    '''
     if PillarDamageFactor>CeilingDamageFactor:
         damage_factor = PillarDamageFactor
     else:
         damage_factor = CeilingDamageFactor
-    objective = -de_minus1 + EFI_WEIGHT * damage_factor
+    '''
+    PILLAR_WEIGHT = 0.03
+    CEILING_WEIGHT = 0.03
+
+    objective = (
+    -de_minus1
+    + PILLAR_WEIGHT * PillarDamageFactor
+    + CEILING_WEIGHT * CeilingDamageFactor
+    )
+    #objective = -de_minus1 + EFI_WEIGHT * PillarDamageFactor
     print(f"duty_cycle={duty_cycle:.3f} pillar height={pillar_height:.1f} "
         f"top height={ceiling_height:.3f} DE-1={de_minus1:.1f}")
     return objective
@@ -140,7 +143,7 @@ def main():
     pillar_height = 400
     ceiling_height = 20
     calculation_function(duty_cycle, pillar_height, ceiling_height)
-    bounds = [(0.2, .3), (100, 1000), (0, 20)]
+    bounds = [(0.2, .4), (100, 1000), (5, 25)]
     result1 = differential_evolution(minimization_function, bounds=bounds, args=(EFI_WEIGHT,),popsize=60, workers=-1, maxiter=1000, polish=True, updating="deferred")
     print(result1)
     duty_cycle = result1.x[0]
@@ -154,6 +157,4 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
 
