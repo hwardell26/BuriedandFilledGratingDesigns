@@ -1,0 +1,168 @@
+import numpy as np
+import meent
+import matplotlib.pyplot as plt
+from scipy.optimize import differential_evolution
+from scipy.optimize import minimize
+n_top = 1.0
+n_bot = 1000
+n_pillar = 0.277# gold at 930nm
+theta = 53.62
+wl_start = 845
+wl_end = 1015
+wavelength = 930
+period = [547.7]
+pol = 0
+fto = 12
+type_complex = np.complex128
+field_res_x = 100
+field_res_z = 100
+field_res_y = 100
+
+N_LAYERS = 12#25       # number slices
+N_FOURIER = 12#25      # number coefficents
+
+
+def build_ucell(duty_cycle, height):
+    ucell_1d_m = np.ones((1, 1, n_bot)) * n_top
+    cutoff = int(n_bot * duty_cycle)
+    ucell_1d_m[0, 0, :cutoff] = n_pillar  
+    thickness = [height]
+    return ucell_1d_m, thickness, cutoff
+
+def build_ucell_fourier(fourier_coeffs, pillar_height, n_layers=N_LAYERS, n_bot=n_bot):
+    x_pix = np.arange(n_bot)
+    x_norm = 2 * np.pi * x_pix / n_bot  
+    h = np.full(n_bot, fourier_coeffs[0], dtype=float)
+    for k, fk in enumerate(fourier_coeffs[1:], start=1):
+        h += fk * np.sin((2 * k - 1) / 2 * x_norm)
+    h_min, h_max = h.min(), h.max() #smooth profile min/max
+    if h_max - h_min < 1e-12:
+        h_norm = np.zeros_like(h)
+    else:
+        h_norm = (h - h_min) / (h_max - h_min)
+    h_profile = h_norm * pillar_height 
+    layer_thickness = pillar_height / n_layers #slice
+    thickness = [layer_thickness] * n_layers
+    ucell_1d_m = np.full((n_layers, 1, n_bot), n_top, dtype=float)
+    for layer_idx in range(n_layers):
+        z_top = pillar_height - layer_idx * layer_thickness  
+        is_material = h_profile >= (z_top - 1e-9)
+        ucell_1d_m[layer_idx, 0, is_material] = n_pillar
+    return ucell_1d_m, thickness, h_profile
+
+def wavelength_sweep(duty_cycle, height, wl_start=wl_start, wl_end=wl_end, wl_step=1):
+    ucell_1d_m, thickness, cutoff = build_ucell(duty_cycle, height)
+    wavelengths = np.arange(wl_start, wl_end + wl_step, wl_step)
+    de_total_r = []
+    de_total_t = []
+    de_order0 = []
+    de_orderm1 = []
+    de_order1 = []
+    wl = 930
+    mee = meent.call_mee(backend=0, n_top=n_top, n_bot=n_bot, theta=theta, fto=fto, pol=pol, period=period, ucell=ucell_1d_m, thickness=thickness, type_complex=type_complex, wavelength=wl)
+    for wl in wavelengths:
+        mee.wavelength = wl
+        result = mee.conv_solve()
+        res = result.res
+        de_ri = res.de_ri_s
+        de_ti = res.de_ti_s
+        de_total_r.append(de_ri.sum())
+        de_total_t.append(de_ti.sum())
+        de_order0.append(de_ri[0, fto])
+        de_orderm1.append(de_ri[0, fto - 1])
+        de_order1.append(de_ri[0, fto + 1])
+        #print(f"wl={wl} nm  R_tot={de_ri.sum():.4f}  T_tot={de_ti.sum():.4f}  DE-1={de_ri[0, fto-1]:.4f}")
+    plt.figure(figsize=(10, 6))
+    plt.plot(wavelengths, de_total_r, label="Total Reflection DE")
+    plt.plot(wavelengths, de_orderm1, label="Order -1 DE")
+    plt.plot(wavelengths, de_order0, label="Order 0 DE")
+    plt.plot(wavelengths, de_order1, label="Order +1 DE")
+    plt.xlabel("Wavelength (nm)")
+    plt.ylabel("Diffraction Efficiency")
+    plt.title(f"DE vs Wavelength (duty={duty_cycle}, height={height})")
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+    return wavelengths, de_total_r, de_orderm1, de_order0, de_order1
+
+def calculation_function(duty_cycle, height):
+    ucell_1d_m, thickness, cutoff = build_ucell(duty_cycle, height)
+    mee = meent.call_mee(backend=0, n_top=n_top, n_bot=n_bot, theta=theta, fto=fto, pol=pol, wavelength=wavelength, period=period, ucell=ucell_1d_m, thickness=thickness, type_complex=type_complex)
+    result1, field_cell = mee.conv_solve_field(res_z=field_res_z, res_y=1, res_x=field_res_x)
+    res = result1.res
+    de_ri = res.de_ri_s
+    de_ti = res.de_ti_s
+    val = np.abs(field_cell[:, 0, :, 0]) ** 2
+    pillar_end = int(val.shape[1] * duty_cycle)
+    pillar_region = val[:, :pillar_end]
+    trench_region = val[:, pillar_end:]
+    print("total DE of reflection", de_ri.sum())
+    print("total DE of transmission", de_ti.sum())
+    print("Order 0 DE", de_ri[0, fto])
+    print("Order -1 DE", de_ri[0, fto - 1])
+    print("Order 1 DE", de_ri[0, fto + 1])
+    print("absorption", (1 - de_ti.sum()) - de_ri.sum())
+    print(pillar_end)
+    print(trench_region.shape)
+    return de_ri, de_ti
+
+def FTO_function(x, n_fourier=N_FOURIER, n_layers=N_LAYERS):
+    pillar_height = x[0]
+    fourier_coeffs = x[1:1 + n_fourier]
+    ucell_1d_m, thickness, h_profile = build_ucell_fourier(fourier_coeffs, pillar_height, n_layers=n_layers)
+    mee = meent.call_mee(backend=0, n_top=n_top, n_bot=n_bot, theta=theta, fto=fto, pol=pol, wavelength=wavelength, period=period, ucell=ucell_1d_m, thickness=thickness, type_complex=type_complex)
+    result1, field_cell = mee.conv_solve_field(res_z=field_res_z, res_y=1, res_x=field_res_x)
+    res = result1.res
+    de_ri = res.de_ri_s
+    de_ti = res.de_ti_s
+    de_minus1 = de_ri[0, fto - 1]
+    absorption = 1 - de_ri.sum() - de_ti.sum()
+    objective = -de_minus1 + absorption
+    print( f"pillar height={pillar_height:.1f} "
+          f"DE-1={de_minus1:.1f}")
+    return objective
+
+def plot_design_map(fourier_coeffs, pillar_height, period_nm=period[0]):
+    ucell_1d_m, thickness, h_profile = build_ucell_fourier(fourier_coeffs, pillar_height)
+    n_bot_local = len(h_profile)
+    x_nm = np.linspace(0, period_nm, n_bot_local)
+    fig, axes = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
+    axes[0].plot(x_nm, h_profile, color="orange")
+    axes[0].set_ylabel("height (nm)")
+    axes[0].set_title("Fourier pillar profile")
+    axes[0].grid(True)
+    material_map = (ucell_1d_m[:, 0, :] == n_pillar).astype(float)
+    z_edges = np.concatenate(([0], np.cumsum(thickness)))
+    axes[1].imshow(material_map, aspect="auto", cmap="gray", extent=[0, period_nm, z_edges[-1], 0])
+    axes[1].set_xlabel("width (nm)")
+    axes[1].set_ylabel("height (nm)")
+    axes[1].set_title("silice structure")
+    plt.tight_layout()
+    plt.show()
+
+def main():
+    duty_cycle = 0.3
+    height = 500
+    wavelength_sweep(duty_cycle, height, wl_start=wl_start, wl_end=wl_end, wl_step=1)
+    calculation_function(duty_cycle, height)
+    bounds = [(100, 900)] + [(0.1, 1.0)] * N_FOURIER
+    x0 = [height] + [duty_cycle] * N_FOURIER
+    #result1 = differential_evolution(FTO_function, bounds=bounds, popsize=60, workers=-1, polish=True, updating="deferred")
+    result1 = minimize(FTO_function, x0, bounds=bounds, method="L-BFGS-B")
+    pillar_height = result1.x[0]
+    fourier_coeffs = result1.x[1:1 + N_FOURIER]
+
+    print("Optimized pillar height =", pillar_height)
+    print("Optimized Fourier coefficients =", fourier_coeffs)
+    ucell_1d_m, thickness, h_profile = build_ucell_fourier(fourier_coeffs, pillar_height)
+    mee = meent.call_mee(backend=0, n_top=n_top, n_bot=n_bot, theta=theta, fto=fto, pol=pol, wavelength=wavelength, period=period, ucell=ucell_1d_m, thickness=thickness, type_complex=type_complex)
+    result_final, field_cell = mee.conv_solve_field(res_z=field_res_z, res_y=1, res_x=field_res_x)
+    res = result_final.res
+    print("Final total DE of reflection", res.de_ri_s.sum())
+    print("Final total DE of transmission", res.de_ti_s.sum())
+    print("Final Order -1 DE", res.de_ri_s[0, fto - 1])
+    plot_design_map(fourier_coeffs, pillar_height)
+
+if __name__ == "__main__":
+    main()
