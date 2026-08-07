@@ -1,3 +1,6 @@
+from turtle import left
+
+from matplotlib.patches import Rectangle
 import numpy as np
 import meent
 import matplotlib.pyplot as plt
@@ -8,8 +11,8 @@ from scipy.optimize import differential_evolution
 
 n_top = 1.0
 n_bot = 1000
-n_film = 1.644 #alumina
-n_pillar = 1.45
+n_film = 1.45 #silica film
+n_pillar = 1.898  #hafnia pillar
 n_trench = 1.0 #air
 theta = 61 * np.pi / 180
 field_res_x = 100
@@ -22,6 +25,9 @@ fto = 12
 type_complex = np.complex128
 UCELL_RES = 1000
 EFI_WEIGHT = 0.06 # Increase to prioritize EFI mitigation (in silica), decrease to prioritize DE
+field_res_x = 100
+field_res_z = 100
+field_res_y = 100
 
 def build_ucell(duty_cycle, pillar_height, film_thickness, x_res=UCELL_RES):
     dx = period[0] / x_res
@@ -104,6 +110,7 @@ def calculation_fuction(duty_cycle, pillar_height, film_thickness):
     de_ri = res.de_ri_s
     de_ti = res.de_ti_s
     val = np.abs(field_cell[:, 0, :, 0])**2
+    pillar_end = int(val.shape[1] * duty_cycle)
     PillarMaxEFI, FilmMaxEFI, TrenchMaxEFI = get_efi_regions(val, cutoffs)
     PillarDamageFactor = PillarMaxEFI * n_pillar**3
     FilmDamageFactor = FilmMaxEFI * n_film**3
@@ -122,17 +129,43 @@ def calculation_fuction(duty_cycle, pillar_height, film_thickness):
     print("film thickness", film_thickness)
     print("LIDT metric", PillarDamageFactor)
 
+    res_z, res_x = val.shape
     total_thickness = sum(thickness)
     extent = [0, period[0], total_thickness, 0]
+
+    from matplotlib.patches import Rectangle
     fig, axes = plt.subplots(1, 2, figsize=(21, 7))
+    dx_field = period[0] / field_res_x
+    dz_field = total_thickness / field_res_z
+    left   = cutoffs['sidewall_px_field']
+    right  = cutoffs['core_cutoff_field'] - cutoffs['sidewall_px_field']
+    core_c = cutoffs['core_cutoff_field']
+    z_top, z_mid = cutoffs['z_top'], cutoffs['z_mid']
+    core_rect_args = dict(xy=(left * dx_field, z_top * dz_field),width=(right - left) * dx_field,height=total_thickness - z_top * dz_field,)
+    film_rects_args = [
+        dict(xy=(0, 0), width=core_c * dx_field, height=z_top * dz_field),
+        dict(xy=(0, z_top * dz_field), width=left * dx_field,
+             height=total_thickness - z_top * dz_field),
+        dict(xy=(right * dx_field, z_top * dz_field),
+             width=(core_c - right) * dx_field, height=z_mid * dz_field),
+        dict(xy=(right * dx_field, (z_top + z_mid) * dz_field),
+             width=period[0] - right * dx_field,
+             height=total_thickness - (z_top + z_mid) * dz_field),]
+    
+    def add_outlines(ax):
+        ax.add_patch(Rectangle(**core_rect_args, edgecolor='cyan',facecolor='none', linewidth=2, label='Pillar (core)'))
+        for i, ra in enumerate(film_rects_args):
+            ax.add_patch(Rectangle(**ra, edgecolor='lime', facecolor='none',linewidth=2, label='Film' if i == 0 else None))
     ax = axes[0]
     im1 = ax.imshow(val, cmap="jet", aspect="auto", origin="upper", extent=extent)
+    add_outlines(ax)
     ax.set_xlabel("X (nm)")
     ax.set_ylabel("Z (nm)")
     ax.set_title("EFI")
     plt.colorbar(im1, ax=ax)
     ax = axes[1]
     im2 = ax.imshow(index_map, cmap="gray", aspect="auto", origin="upper", extent=extent)
+    add_outlines(ax)
     ax.set_xlabel("X (nm)")
     ax.set_ylabel("Z (nm)")
     ax.set_title("Refractive Index Map")
@@ -152,10 +185,20 @@ def minimization_factor(x, EFI_WEIGHT):
     pillar_max_efi, film_max_efi, trench_max_efi = get_efi_regions(val, cutoffs)
     PillarDamageFactor = pillar_max_efi * n_pillar**3
     FilmDamageFactor = film_max_efi * n_film**3
+    PILLAR_WEIGHT = 0.05
+    FILM_WEIGHT = 0.00
+
+    objective = (
+        -de_minus1
+        + PILLAR_WEIGHT * PillarDamageFactor
+        + FILM_WEIGHT * FilmDamageFactor
+        )
+    '''
     damage_factor = max(PillarDamageFactor, FilmDamageFactor)
     objective = -de_minus1 + EFI_WEIGHT * damage_factor
+    '''
     print(f"duty_cycle={duty_cycle:.3f} pillar height={pillar_height:.1f} "
-          f"film thickness={film_thickness:.3f} DE-1={de_minus1:.4f} damage={damage_factor:.4f}")
+          f"film thickness={film_thickness:.3f} DE-1={de_minus1:.4f}")
     return objective
 
 def main():
